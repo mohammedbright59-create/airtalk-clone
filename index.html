@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AirTalk Clone</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/simple-peer/9.11.1/simplepeer.min.js"></script>
+</head>
+<body class="bg-gray-900 text-white font-sans flex flex-col justify-between h-screen">
+
+    <!-- Header -->
+    <header class="p-5 border-b border-gray-800 flex justify-between items-center bg-gray-950">
+        <h1 class="text-2xl font-bold tracking-wider text-indigo-400">👋 AirTalk Clone</h1>
+        <div id="status" class="text-sm bg-gray-800 px-3 py-1 rounded-full text-gray-400">Disconnected</div>
+    </header>
+
+    <!-- Main Chat Window -->
+    <main class="flex-1 flex flex-col max-w-4xl w-full mx-auto p-4 md:p-6 overflow-hidden">
+        
+        <!-- Audio Status / Call Window -->
+        <div class="bg-gray-950 border border-gray-800 rounded-xl p-6 mb-4 flex flex-col items-center justify-center text-center space-y-4 min-h-[160px]">
+            <div id="call-status" class="text-xl font-medium text-gray-300">Tap "Find Match" to start talking anonymously</div>
+            <div id="timer" class="text-sm text-indigo-400 hidden">00:00</div>
+            <!-- Hidden audio element to play partner's stream -->
+            <audio id="remote-audio" autoplay></audio>
+        </div>
+
+        <!-- Text Chat Box -->
+        <div class="flex-1 bg-gray-950 border border-gray-800 rounded-xl flex flex-col overflow-hidden">
+            <div id="messages" class="flex-1 p-4 overflow-y-auto space-y-3 flex flex-col">
+                <!-- Messages dynamic dump -->
+            </div>
+
+            <!-- Input Box -->
+            <form id="chat-form" class="p-3 bg-gray-900 border-t border-gray-800 flex space-x-2">
+                <input id="message-input" type="text" placeholder="Type a message..." autocomplete="off" disabled
+                    class="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-white focus:outline-none focus:border-indigo-500 disabled:opacity-50">
+                <button type="submit" id="send-btn" disabled
+                    class="bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-2 rounded-lg font-medium transition disabled:opacity-50">Send</button>
+            </form>
+        </div>
+    </main>
+
+    <!-- Control Bar -->
+    <footer class="p-4 bg-gray-950 border-t border-gray-800 flex justify-center space-x-4">
+        <button id="match-btn" class="bg-indigo-600 hover:bg-indigo-500 text-white font-semibold px-8 py-3 rounded-xl shadow-lg transition transform active:scale-95">
+            Find Match
+        </button>
+        <button id="skip-btn" class="bg-rose-600 hover:bg-rose-500 text-white font-semibold px-8 py-3 rounded-xl shadow-lg transition transform active:scale-95 hidden">
+            Skip / Next
+        </button>
+    </footer>
+
+    <script>
+        const socket = io();
+        let localStream = null;
+        let peer = null;
+        let currentRoom = null;
+        let partnerId = null;
+        let callTimer = null;
+        let secondsElapsed = 0;
+
+        const matchBtn = document.getElementById('match-btn');
+        const skipBtn = document.getElementById('skip-btn');
+        const statusDiv = document.getElementById('status');
+        const callStatus = document.getElementById('call-status');
+        const timerDiv = document.getElementById('timer');
+        const remoteAudio = document.getElementById('remote-audio');
+        const messagesDiv = document.getElementById('messages');
+        const chatForm = document.getElementById('chat-form');
+        const messageInput = document.getElementById('message-input');
+        const sendBtn = document.getElementById('send-btn');
+
+        socket.on('connect', () => {
+            statusDiv.textContent = 'Connected to Server';
+            statusDiv.className = 'text-sm bg-emerald-950 px-3 py-1 rounded-full text-emerald-400';
+        });
+
+        socket.on('disconnect', () => {
+            statusDiv.textContent = 'Disconnected';
+            statusDiv.className = 'text-sm bg-gray-800 px-3 py-1 rounded-full text-gray-400';
+            resetUI();
+        });
+
+        matchBtn.addEventListener('click', async () => {
+            matchBtn.classList.add('hidden');
+            skipBtn.classList.remove('hidden');
+            callStatus.textContent = 'Requesting microphone permission...';
+            
+            try {
+                if (!localStream) {
+                    localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+                }
+                callStatus.textContent = 'Searching for a stranger...';
+                socket.emit('join_queue');
+            } catch (err) {
+                console.error(err);
+                callStatus.textContent = 'Microphone access denied. Please enable mic permissions.';
+                resetUI();
+            }
+        });
+
+        skipBtn.addEventListener('click', () => {
+            socket.emit('leave_room');
+            resetUI();
+            matchBtn.classList.add('hidden');
+            skipBtn.classList.remove('hidden');
+            callStatus.textContent = 'Searching for a stranger...';
+            socket.emit('join_queue');
+        });
+
+        socket.on('waiting', (data) => {
+            callStatus.textContent = data.status;
+        });
+
+        socket.on('match_found', (data) => {
+            currentRoom = data.roomId;
+            partnerId = data.partnerId;
+            callStatus.textContent = 'Connected with a stranger! Say hello.';
+            
+            // Enable text chatting
+            messageInput.disabled = false;
+            sendBtn.disabled = false;
+            appendSystemMessage('System', 'You are now connected with a stranger anonymously.');
+            
+            startTimer();
+
+            // Setup WebRTC Peer
+            peer = new SimplePeer({
+                initiator: data.initiateCall,
+                trickle: false,
+                stream: localStream
+            });
+
+            peer.on('signal', (signal) => {
+                socket.emit('webrtc_signal', {
+                    to: partnerId,
+                    signal: signal
+                });
+            });
+
+            peer.on('stream', (stream) => {
+                remoteAudio.srcObject = stream;
+            });
+
+            peer.on('close', () => {
+                resetUI();
+            });
+            
+            peer.on('error', (err) => console.error('Peer error:', err));
+        });
+
+        socket.on('webrtc_signal', (data) => {
+            if (peer) peer.signal(data.signal);
+        });
+
+        socket.on('partner_disconnected', () => {
+            appendSystemMessage('System', 'Stranger has disconnected.');
+            resetUI();
+        });
+
+        // Chat Box Handling
+        chatForm.addEventListener('submit', (e) => {
+            e.preventDefault();
+            const text = messageInput.value.trim();
+            if (!text || !currentRoom) return;
+
+            socket.emit('text_message', { room: currentRoom, message: text });
+            appendMessage('You', text, 'bg-indigo-600 self-end text-white');
+            messageInput.value = '';
+        });
+
+        socket.on('text_message', (data) => {
+            appendMessage('Stranger', data.message, 'bg-gray-800 self-start text-gray-200');
+        });
+
+        function appendMessage(sender, text, classes) {
+            const msgEl = document.createElement('div');
+            msgEl.className = `max-w-[70%] rounded-lg px-4 py-2 ${classes}`;
+            msgEl.innerHTML = `<span class="block text-xs text-gray-400 mb-0.5">${sender}</span>${escapeHTML(text)}`;
+            messagesDiv.appendChild(msgEl);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+
+        function appendSystemMessage(sender, text) {
+            const msgEl = document.createElement('div');
+            msgEl.className = 'text-center text-xs text-gray-500 my-2 w-full';
+            msgEl.textContent = text;
+            messagesDiv.appendChild(msgEl);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+
+        function escapeHTML(str) {
+            return str.replace(/[&<>'"]/g, 
+                tag => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[tag] || tag)
+            );
+        }
+
+        function startTimer() {
+            clearInterval(callTimer);
+            secondsElapsed = 0;
+            timerDiv.classList.remove('hidden');
+            callTimer = setInterval(() => {
+                secondsElapsed++;
+                const mins = String(Math.floor(secondsElapsed / 60)).padStart(2, '0');
+                const secs = String(secondsElapsed % 60).padStart(2, '0');
+                timerDiv.textContent = `${mins}:${secs}`;
+            }, 1000);
+        }
+
+        function resetUI() {
+            clearInterval(callTimer);
+            timerDiv.classList.add('hidden');
+            callStatus.textContent = 'Tap "Find Match" to start talking anonymously';
+            matchBtn.classList.remove('hidden');
+            skipBtn.classList.add('hidden');
+            messageInput.disabled = true;
+            sendBtn.disabled = true;
+            messageInput.value = '';
+            currentRoom = null;
+            partnerId = null;
+            if (peer) {
+                peer.destroy();
+                peer = null;
+            }
+            remoteAudio.srcObject = null;
+        }
+    </script>
+</body>
+</html>
